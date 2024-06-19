@@ -778,78 +778,59 @@ fn characterReference(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
 }
 
 fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
-    const result = try findNamedCharacterReference(tokenizer, num_consumed_chars);
-    const match_found = result.chars[0] != null;
-    if (match_found) {
-        const dont_emit_chars = if (tag_data != null and !result.ends_with_semicolon)
+    // We need to keep track of the name in order to look up the associated codepoints.
+    // The longest character reference is &CounterClockwiseContourIntegral;
+    const max_char_refence_len = 33;
+    var tmp_buf = std.BoundedArray(u8, max_char_refence_len).init(0) catch unreachable;
+
+    var matcher = named_characters.Matcher{};
+    var num_pending_chars: usize = 0;
+    while (true) {
+        const character = nextNoErrorCheck(tokenizer) orelse {
+            undo(tokenizer);
+            break;
+        };
+        if (character > std.math.maxInt(u8) or !matcher.char(@intCast(character))) {
+            undo(tokenizer);
+            break;
+        }
+        num_pending_chars += 1;
+        tmp_buf.append(@intCast(character)) catch unreachable;
+        if (matcher.matched()) {
+            num_consumed_chars.* += num_pending_chars;
+            num_pending_chars = 0;
+        }
+    }
+
+    while (num_pending_chars > 0) : (num_pending_chars -= 1) {
+        undo(tokenizer);
+        tmp_buf.len -= 1;
+    }
+
+    // Found a match
+    if (tmp_buf.len != 0) {
+        const ends_with_semicolon = tmp_buf.constSlice()[tmp_buf.len - 1] == ';';
+        const dont_emit_chars = if (tag_data != null and !ends_with_semicolon)
             switch (peekIgnoreEof(tokenizer)) {
                 '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
                 else => false,
             }
         else
             false;
-
         if (dont_emit_chars) {
             return flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
-        } else {
-            if (!result.ends_with_semicolon) {
-                try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
-            }
-            try characterReferenceEmitCharacter(tokenizer, tag_data, result.chars[0].?);
-            if (result.chars[1]) |second| try characterReferenceEmitCharacter(tokenizer, tag_data, second);
         }
+
+        const codepoints = named_characters.getCodepointsNoAmpresand(tmp_buf.constSlice());
+        if (!ends_with_semicolon) {
+            try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
+        }
+        try characterReferenceEmitCharacter(tokenizer, tag_data, codepoints.first);
+        if (codepoints.second.asInt()) |second| try characterReferenceEmitCharacter(tokenizer, tag_data, second);
     } else {
         try flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
         return ambiguousAmpersand(tokenizer, tag_data);
     }
-}
-
-const FindNamedCharacterReferenceResult = struct {
-    chars: named_characters.Value,
-    ends_with_semicolon: bool,
-};
-
-fn findNamedCharacterReference(tokenizer: *Tokenizer, num_consumed_chars: *usize) !FindNamedCharacterReferenceResult {
-    var last_index_with_value = named_characters.root_index;
-    var ends_with_semicolon: bool = false;
-
-    var entry = named_characters.root_index.entry();
-    var num_pending_chars: usize = 0;
-
-    while (true) {
-        const character = nextNoErrorCheck(tokenizer) orelse {
-            undo(tokenizer);
-            break;
-        };
-        num_pending_chars += 1;
-        const child_index = entry.findChild(character) orelse break;
-        entry = child_index.entry();
-
-        if (entry.has_children) {
-            if (entry.has_value) {
-                // Partial match found.
-                num_consumed_chars.* += num_pending_chars;
-                num_pending_chars = 0;
-                last_index_with_value = child_index;
-                ends_with_semicolon = character == ';';
-            }
-        } else {
-            // Complete match found.
-            num_consumed_chars.* += num_pending_chars;
-            num_pending_chars = 0;
-            last_index_with_value = child_index;
-            ends_with_semicolon = character == ';';
-            break;
-        }
-    }
-
-    while (num_pending_chars > 0) : (num_pending_chars -= 1) {
-        undo(tokenizer);
-    }
-
-    // There is no need to check the consumed characters for errors (controls, surrogates, noncharacters)
-    // beacuse we've just determined that they form a valid character reference.
-    return FindNamedCharacterReferenceResult{ .chars = last_index_with_value.value(), .ends_with_semicolon = ends_with_semicolon };
 }
 
 fn ambiguousAmpersand(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
