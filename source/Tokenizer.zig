@@ -778,11 +778,6 @@ fn characterReference(tokenizer: *Tokenizer, tag_data: ?*TagData) !void {
 }
 
 fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consumed_chars: *usize) !void {
-    // We need to keep track of the name in order to look up the associated codepoints.
-    // The longest character reference is &CounterClockwiseContourIntegral;
-    const max_char_refence_len = 33;
-    var tmp_buf = std.BoundedArray(u8, max_char_refence_len).init(0) catch unreachable;
-
     var matcher = named_characters.Matcher{};
     var num_pending_chars: usize = 0;
     while (true) {
@@ -790,12 +785,8 @@ fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consu
             undo(tokenizer);
             break;
         };
-        if (character > std.math.maxInt(u8) or !matcher.char(@intCast(character))) {
-            undo(tokenizer);
-            break;
-        }
         num_pending_chars += 1;
-        tmp_buf.append(@intCast(character)) catch unreachable;
+        if (!matcher.codepoint(character)) break;
         if (matcher.matched()) {
             num_consumed_chars.* += num_pending_chars;
             num_pending_chars = 0;
@@ -804,13 +795,10 @@ fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consu
 
     while (num_pending_chars > 0) : (num_pending_chars -= 1) {
         undo(tokenizer);
-        tmp_buf.len -= 1;
     }
 
-    // Found a match
-    if (tmp_buf.len != 0) {
-        const ends_with_semicolon = tmp_buf.constSlice()[tmp_buf.len - 1] == ';';
-        const dont_emit_chars = if (tag_data != null and !ends_with_semicolon)
+    if (matcher.getCodepoints()) |codepoints| {
+        const dont_emit_chars = if (tag_data != null and !matcher.ends_with_semicolon)
             switch (peekIgnoreEof(tokenizer)) {
                 '=', '0'...'9', 'A'...'Z', 'a'...'z' => true,
                 else => false,
@@ -821,8 +809,7 @@ fn namedCharacterReference(tokenizer: *Tokenizer, tag_data: ?*TagData, num_consu
             return flushCharacterReference(tokenizer, tag_data, num_consumed_chars);
         }
 
-        const codepoints = named_characters.getCodepointsNoAmpresand(tmp_buf.constSlice());
-        if (!ends_with_semicolon) {
+        if (!matcher.ends_with_semicolon) {
             try tokenizer.parseError(.MissingSemicolonAfterCharacterReference);
         }
         try characterReferenceEmitCharacter(tokenizer, tag_data, codepoints.first);
